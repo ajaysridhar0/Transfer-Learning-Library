@@ -23,11 +23,11 @@ class MultidomainDiscriminator(nn.Sequential):
     """
     def __init__(self,
                  in_feature: int,
-                 num_classes: int = 1,
                  hidden_size: int,
+                 num_classes: int = 1,
                  batch_norm=True):
         if batch_norm:
-            super(DomainDiscriminator,
+            super(MultidomainDiscriminator,
                   self).__init__(nn.Linear(in_feature, hidden_size),
                                  nn.BatchNorm1d(hidden_size), nn.ReLU(),
                                  nn.Linear(hidden_size, hidden_size),
@@ -35,7 +35,7 @@ class MultidomainDiscriminator(nn.Sequential):
                                  nn.Linear(hidden_size, num_classes),
                                  nn.Sigmoid())
         else:
-            super(DomainDiscriminator,
+            super(MultidomainDiscriminator,
                   self).__init__(nn.Linear(in_feature, hidden_size),
                                  nn.ReLU(inplace=True), nn.Dropout(0.5),
                                  nn.Linear(hidden_size, hidden_size),

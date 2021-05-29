@@ -2,6 +2,7 @@ import os
 from typing import Optional, List
 from .imagelist import ImageList
 from ._util import download as download_data, check_exits
+from itertools import product
 
 
 class ModifiedOfficeHome(ImageList):
@@ -50,6 +51,12 @@ class ModifiedOfficeHome(ImageList):
         "Pr": "image_list/Product.txt",
         "Rw": "image_list/Real_World.txt",
     }
+    mod_image_style_list = {
+        "Ar": "image_list/Modifed_Art.txt",
+        "Cl": "image_list/Modified_Clipart.txt",
+        "Pr": "image_list/Modified_Product.txt",
+        "Rw": "image_list/Modified_Real_World.txt",
+    }
     CATEGORIES = ['Drill', 'Exit_Sign', 'Bottle', 'Glasses', 'Computer', 'File_Cabinet', 'Shelf', 'Toys', 'Sink',
                   'Laptop', 'Kettle', 'Folder', 'Keyboard', 'Flipflops', 'Pencil', 'Bed', 'Hammer', 'ToothBrush', 'Couch',
                   'Bike', 'Postit_Notes', 'Mug', 'Webcam', 'Desk_Lamp', 'Telephone', 'Helmet', 'Mouse', 'Pen', 'Monitor',
@@ -57,13 +64,18 @@ class ModifiedOfficeHome(ImageList):
                   'Fan', 'Ruler', 'Pan', 'Screwdriver', 'Trash_Can', 'Printer', 'Speaker', 'Eraser', 'Bucket', 'Chair',
                   'Calendar', 'Calculator', 'Flowers', 'Lamp_Shade', 'Spoon', 'Candles', 'Clipboards', 'Scissors', 'TV',
                   'Curtains', 'Fork', 'Soda', 'Table', 'Knives', 'Oven', 'Refrigerator', 'Marker']
+    CLASSES = product(list(image_style_list.keys), CATEGORIES)
 
     def __init__(self, root: str, tasks: List[str], download: Optional[bool] = False, **kwargs):
+        # TODO: Incorporate modified style file list
         # TODO: Make it accept lists of styles
         # assert task in self.image_list
+        data_list_files = []
         for task in tasks:
             assert task in self.image_style_list
-        data_list_file = os.path.join(root, self.image_style_list[task])
+            data_list_files.append(
+                os.path.join(root, self.image_style_list[task])
+            )
         self.num_categories = len(ModifiedOfficeHome.CATEGORIES)
         self.num_styles = len(ModifiedOfficeHome.image_style_list)
         self.was_modified_file_path = os.path.join(
@@ -73,16 +85,17 @@ class ModifiedOfficeHome(ImageList):
                 f.write(str(False))
         if download:
             list(map(lambda args: download_data(root, *args), self.download_list))
-            # check if the file has been modified
+            # check if the dataset file has been modified
             with open(self.was_modified_file_path, 'r') as f:
                 line = f.readline()
                 was_modified = eval(line)
             if not was_modified:
-                # modify the file with the new category-style label
                 with open(self.was_modified_file_path, 'w') as f:
                     f.write(str(True))
+                # modify the file with the new category-style label
                 category_index = 0
                 for file_name in self.image_style_list:
+                    file_name = os.path.join(self.root, file_name)
                     new_contents = ""
                     with open(file_name, "r") as f:
                         for line in f.readlines():
@@ -102,7 +115,8 @@ class ModifiedOfficeHome(ImageList):
                 root, file_name), self.download_list))
 
         super(ModifiedOfficeHome, self).__init__(
-            root, ModifiedOfficeHome.CATEGORIES, data_list_file=data_list_file, **kwargs)
+            # TODO: Adapt the code for predicting style instead of category
+            root, ModifiedOfficeHome.CATEGORIES, data_list_files=data_list_files, **kwargs)
 
     @classmethod
     def domains(cls):

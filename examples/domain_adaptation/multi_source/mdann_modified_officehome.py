@@ -71,7 +71,7 @@ def main(args: argparse.Namespace):
          T.CenterCrop(224),
          T.ToTensor(), normalize])
 
-    dataset = datasets.__dict__[args.data]
+    dataset = datasets.__dict__["ModifiedOfficeHome"]
 
     print("Source: {} Target: {}".format(args.sources, args.targets))
     train_source_dataset = dataset(root=args.root,
@@ -140,6 +140,7 @@ def main(args: argparse.Namespace):
     classifier = ImageClassifier(backbone,
                                  train_source_dataset.num_classes,
                                  bottleneck_dim=args.bottleneck_dim).to(device)
+    # TODO: Make the domain discriminator work on multiple domains
     domain_discri = DomainDiscriminator(in_feature=classifier.features_dim,
                                         hidden_size=1024).to(device)
 
@@ -154,6 +155,7 @@ def main(args: argparse.Namespace):
         optimizer, lambda x: args.lr *
         (1. + args.lr_gamma * float(x))**(-args.lr_decay))
 
+    # TODO: Make a new version of the loss function to adapt to multidomain classification
     # define loss function
     domain_adv = DomainAdversarialLoss(domain_discri).to(device)
 
@@ -238,6 +240,9 @@ def train(train_source_iter: ForeverDataIterator,
         [batch_time, data_time, losses, cls_accs, domain_accs],
         prefix="Epoch: [{}]".format(epoch))
 
+    # define number of classes to predict
+    
+
     # switch to train mode
     model.train()
     domain_adv.train()
@@ -245,11 +250,20 @@ def train(train_source_iter: ForeverDataIterator,
     end = time.time()
     for i in range(args.iters_per_epoch):
         x_s, labels_s = next(train_source_iter)
-        x_t, _ = next(train_target_iter)
+        x_t, labels_t = next(train_target_iter)
+
+        # retrieve the class and domain from the modified office_home dataset
+        class_labels_s = labels_s % model.num_classes
+        domain_labels_s = labels_s // model.num_classes
+        domain_labels_t = labels_t // model.num_classes
 
         x_s = x_s.to(device)
         x_t = x_t.to(device)
-        labels_s = labels_s.to(device)
+        # labels_s = labels_s.to(device)
+        # add new labels to device
+        class_labels_s.to(device)
+        domain_labels_s.to(device)
+        domain_labels_t.to(device)
 
         # measure data loading time
         data_time.update(time.time() - end)
@@ -260,7 +274,10 @@ def train(train_source_iter: ForeverDataIterator,
         y_s, y_t = y.chunk(2, dim=0)
         f_s, f_t = f.chunk(2, dim=0)
 
-        cls_loss = F.cross_entropy(y_s, labels_s)
+        # Updating the loss functions with new labels
+        # cls_loss = F.cross_entropy(y_s, labels_s)
+        cls_loss = F.cross_entropy(y_s, class_labels_s)
+        # TODO: Make a new domain discriminator for multiple class labels
         transfer_loss = domain_adv(f_s, f_t)
         domain_acc = domain_adv.domain_discriminator_accuracy
         loss = cls_loss + transfer_loss * args.trade_off
@@ -362,15 +379,15 @@ if __name__ == '__main__':
         if not name.startswith("__") and callable(datasets.__dict__[name]))
 
     parser = argparse.ArgumentParser(
-        description='DANN for Unsupervised Domain Adaptation')
+        description='MDANN for Mulisource and Multidomain Adpation')
     # dataset parameters
     parser.add_argument('root', metavar='DIR', help='root path of dataset')
-    parser.add_argument('-d',
-                        '--data',
-                        metavar='DATA',
-                        default='Office-Home',
-                        help='dataset: ' + ' | '.join(dataset_names) +
-                        ' (default: Office31)')
+    # parser.add_argument('-d',
+    #                     '--data',
+    #                     metavar='DATA',
+    #                     default='Office-Home',
+    #                     help='dataset: ' + ' | '.join(dataset_names) +
+    #                     ' (default: Office-Home)')
     parser.add_argument('-s', '--sources', nargs='+', help='source domain(s)')
     parser.add_argument('-t', '--targets', nargs='+', help='target domain(s)')
     # parser.add_argument('-s', '--source', help='source domain(s)')
