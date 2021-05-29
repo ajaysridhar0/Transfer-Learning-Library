@@ -65,58 +65,56 @@ class ModifiedOfficeHome(ImageList):
                   'Calendar', 'Calculator', 'Flowers', 'Lamp_Shade', 'Spoon', 'Candles', 'Clipboards', 'Scissors', 'TV',
                   'Curtains', 'Fork', 'Soda', 'Table', 'Knives', 'Oven', 'Refrigerator', 'Marker']
     CLASSES = product(list(image_style_list.keys), CATEGORIES)
+    category_index = 0
 
     def __init__(self, root: str, tasks: List[str], download: Optional[bool] = False, **kwargs):
         # TODO: Incorporate modified style file list
         # TODO: Make it accept lists of styles
         # assert task in self.image_list
+        mod_data_list_files = []
         data_list_files = []
         for task in tasks:
             assert task in self.image_style_list
+            mod_data_list_files.append(
+                os.path.join(root, self.mod_image_style_list[task])
+            )
             data_list_files.append(
-                os.path.join(root, self.image_style_list[task])
+                os.path.join(root, self.mod_image_style_list[task])
             )
         self.num_categories = len(ModifiedOfficeHome.CATEGORIES)
         self.num_styles = len(ModifiedOfficeHome.image_style_list)
-        self.was_modified_file_path = os.path.join(
-            self.root, "has-modified.txt")
         if not self.was_modified_file_path.isfile():
             with open(self.was_modified_file_path, 'w') as f:
                 f.write(str(False))
         if download:
             list(map(lambda args: download_data(root, *args), self.download_list))
-            # check if the dataset file has been modified
-            with open(self.was_modified_file_path, 'r') as f:
-                line = f.readline()
-                was_modified = eval(line)
-            if not was_modified:
-                with open(self.was_modified_file_path, 'w') as f:
-                    f.write(str(True))
-                # modify the file with the new category-style label
-                category_index = 0
-                for file_name in self.image_style_list:
-                    file_name = os.path.join(self.root, file_name)
-                    new_contents = ""
-                    with open(file_name, "r") as f:
-                        for line in f.readlines():
-                            split_line = line.split()
-                            target = split_line[-1]
-                            path = ' '.join(split_line[:-1])
-                            target = int(target)
-                            new_target = str(
-                                target + category_index * self.num_categories
-                            )
-                            new_contents += path + ' ' + new_target + '\n'
-                    with open(file_name, "w") as f:
-                        f.write(new_contents)
-                    category_index += 1
         else:
             list(map(lambda file_name, _: check_exits(
                 root, file_name), self.download_list))
 
+        # check if the dataset file has been modified
+        # modify the file with the new category-style label
+        for i in range(len(mod_data_list_files)):
+            file_name = data_list_files[i]
+            new_contents = ""
+            with open(file_name, "r") as f:
+                for line in f.readlines():
+                    split_line = line.split()
+                    target = split_line[-1]
+                    path = ' '.join(split_line[:-1])
+                    target = int(target)
+                    new_target = str(
+                        target + ModifiedOfficeHome.category_index * self.num_categories
+                    )
+                    new_contents += path + ' ' + new_target + '\n'
+            mod_file_name = mod_data_list_files[i]
+            with open(mod_file_name, "w") as f:
+                f.write(new_contents)
+            ModifiedOfficeHome.category_index += 1
+
         super(ModifiedOfficeHome, self).__init__(
             # TODO: Adapt the code for predicting style instead of category
-            root, ModifiedOfficeHome.CATEGORIES, data_list_files=data_list_files, **kwargs)
+            root, ModifiedOfficeHome.CATEGORIES, data_list_files=mod_data_list_files, **kwargs)
 
     @classmethod
     def domains(cls):
