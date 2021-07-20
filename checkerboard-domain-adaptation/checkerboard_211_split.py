@@ -154,14 +154,20 @@ def main(args: argparse.Namespace):
                                  bottleneck_dim=args.bottleneck_dim,
                                  finetune=args.finetune).to(device)
 
-    multidomain_discri = MultidomainDiscriminator(
+    multidomain_discri_1 = MultidomainDiscriminator(
+        in_feature=classifier.features_dim,
+        hidden_size=1024,
+        num_domains=len(datasets.domains())).to(device)
+    
+    multidomain_discri_2 = MultidomainDiscriminator(
         in_feature=classifier.features_dim,
         hidden_size=1024,
         num_domains=len(datasets.domains())).to(device)
 
     # define optimizer and lr scheduler
     optimizer = SGD(classifier.get_parameters() +
-                    multidomain_discri.get_parameters(),
+                    multidomain_discri_1.get_parameters() +
+                    multidomain_discri_2.get_parameters(),
                     args.lr,
                     momentum=args.momentum,
                     weight_decay=args.weight_decay,
@@ -173,10 +179,11 @@ def main(args: argparse.Namespace):
 
     # define loss function for domain discrimination
     if args.use_warm_grl:
-        grl = GradientReverseLayer()
-    else:
         grl = WarmStartGradientReverseLayer()
-    multidomain_adv = MultidomainAdversarialLoss(multidomain_discri, grl=grl).to(device)
+    else:
+        grl = GradientReverseLayer()
+    multidomain_adv_1 = MultidomainAdversarialLoss(multidomain_discri_1, grl=grl).to(device)
+    multidomain_adv_2 = MultidomainAdversarialLoss(multidomain_discri_2, grl=grl).to(device)
 
     # resume from the best or latest checkpoint
     if args.phase != 'train':
@@ -259,7 +266,7 @@ def main(args: argparse.Namespace):
         return
 
     if args.phase == 'novel':
-        acc1, novel_log, _ = validate(novel_loader, classifier, multidomain_adv,
+        acc1, novel_log, _ = validate(novel_loader, classifier, multidomain_adv_1,
                                    args, 'Novel', True)
         print(f'novel_acc1 = {acc1}')
         novel_log.update(partial_analysis(novel_log, 'Novel'))
@@ -272,12 +279,12 @@ def main(args: argparse.Namespace):
     best_epoch = 0
     for epoch in range(args.epochs):
         # train for one epoch
-        train_log, lambda_trade_off = train(train_iter, classifier, multidomain_adv, optimizer,
+        train_log, lambda_trade_off = train(train_iter, classifier, multidomain_adv_1, multidomain_adv_2, optimizer,
                           lr_scheduler, lambda_trade_off, epoch, args)
 
         # evaluate on validation set
         is_final_epoch = epoch == args.epochs - 1
-        acc1, val_log, _ = validate(val_loader, classifier, multidomain_adv, args,
+        acc1, val_log, _ = validate(val_loader, classifier, multidomain_adv_1, args,
                                  'Validation',  gen_conf_mat=False, 
                                  calc_temp=False, gen_reli_diag=False, gen_rejection_curve=False)
 
@@ -305,19 +312,19 @@ def main(args: argparse.Namespace):
             torch.load(logger.get_checkpoint_path('latest')))
 
     # evaluate best model on validation set with more information and temp calculation
-    acc1, best_val_log, t = validate(val_loader, classifier, multidomain_adv, args,
+    acc1, best_val_log, t = validate(val_loader, classifier, multidomain_adv_1, args,
                                  'Best Model on Validation',  gen_conf_mat=True, 
                                  conf_interval=True, calc_temp=True, gen_reli_diag=True)
     print("best_val_acc1 = {:3.1f}".format(acc1))
     
     # evaluate best model on validation set with more information and temp calculation
-    acc1, test_log, _ = validate(test_loader, classifier, multidomain_adv, args,
+    acc1, test_log, _ = validate(test_loader, classifier, multidomain_adv_1, args,
                                  'Test',  gen_conf_mat=True, calc_temp=False, 
                                  conf_interval=True, input_temperature=t, gen_reli_diag=True)
     print("test_acc1 = {:3.1f}".format(acc1))
 
     # evaluate on novel set
-    acc1, novel_log, _ = validate(novel_loader, classifier, multidomain_adv, args,
+    acc1, novel_log, _ = validate(novel_loader, classifier, multidomain_adv_1, args,
                                'Novel', gen_conf_mat=True, calc_temp=False, 
                                conf_interval=True, input_temperature=t, gen_reli_diag=True)
     print("novel_acc1 = {:3.1f}".format(acc1))
@@ -343,7 +350,8 @@ def get_grad_list(backbone: nn.Module):
 
 def train(train_iter: ForeverDataIterator, 
           model: ImageClassifier,
-          multidomain_adv: MultidomainAdversarialLoss, 
+          multidomain_adv_1: MultidomainAdversarialLoss, 
+          multidomain_adv_2: MultidomainAdversarialLoss, 
           optimizer: SGD,
           lr_scheduler: LambdaLR,
           lambda_trade_off: int, 
@@ -354,17 +362,20 @@ def train(train_iter: ForeverDataIterator,
     data_time = AverageMeter('Data', ':5.2f')
     total_losses = AverageMeter('Loss', ':6.2f')
     cls_losses = AverageMeter('Cls Loss', ':6.2f')
-    transfer_losses = AverageMeter('Transfer Loss', ':6.2f')
+    transfer_losses_1 = AverageMeter('Transfer Loss 1', ':6.2f')
+    transfer_losses_2 = AverageMeter('Transfer Loss 2', ':6.2f')
     cls_accs = AverageMeter('Cls Acc', ':3.1f')
-    domain_accs = AverageMeter('Domain Acc', ':3.1f')
+    domain_accs_1 = AverageMeter('Domain Acc 1', ':3.1f')
+    domain_accs_2 = AverageMeter('Domain Acc 2', ':3.1f')
     progress = ProgressMeter(
         args.iters_per_epoch,
-        [batch_time, data_time, total_losses, cls_accs, domain_accs],
+        [batch_time, data_time, total_losses, cls_accs, domain_accs_1, domain_accs_2],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
     model.train()
-    multidomain_adv.train()
+    multidomain_adv_1.train()
+    multidomain_adv_2.train()
 
     end = time.time()
     target_transfer_loss = np.log(num_domains)
@@ -391,30 +402,34 @@ def train(train_iter: ForeverDataIterator,
 
         # calculate losses
         cls_loss = F.cross_entropy(y_tr, class_labels_tr)
-        transfer_loss = multidomain_adv(f_tr, domain_labels_tr)
+        transfer_loss_1 = multidomain_adv_1(f_tr, domain_labels_tr)
+        transfer_loss_2 = multidomain_adv_2(f_tr, domain_labels_tr)
         # TODO: Find scheduler for trade_off
-        if args.use_lagrange_multiplier:
-            lambda_trade_off += get_lr(optimizer) * -(transfer_loss.item() - target_transfer_loss)
-        total_loss = cls_loss + transfer_loss * lambda_trade_off # args.trade_off
+        # if args.use_lagrange_multiplier:
+        #     lambda_trade_off += get_lr(optimizer) * -(transfer_loss_1.item() - target_transfer_loss)
+        total_loss = cls_loss + 0.5 * (transfer_loss_1 +  transfer_loss_2) * lambda_trade_off # args.trade_off
         
         # # TODO: Freeze the weights (or not)
         if i % (1 + args.d_steps_per_g) < args.d_steps_per_g:
-            loss_to_minimize = transfer_loss
+            loss_to_minimize = transfer_loss_1 + transfer_loss_2
         else:
             loss_to_minimize = total_loss
 
         # calculate accuracy
         cls_acc = accuracy(y_tr, class_labels_tr)[0]
-        domain_acc = multidomain_adv.domain_discriminator_accuracy
+        domain_acc_1 = multidomain_adv_1.domain_discriminator_accuracy
+        domain_acc_2 = multidomain_adv_2.domain_discriminator_accuracy
 
         # update loss meter
         cls_losses.update(cls_loss.item(), x_tr.size(0))
-        transfer_losses.update(transfer_loss.item(), x_tr.size(0))
-        # total_losses.update(total_loss.item(), x_tr.size(0))
+        transfer_losses_1.update(transfer_loss_1.item(), x_tr.size(0))
+        transfer_losses_2.update(transfer_loss_2.item(), x_tr.size(0))
+        total_losses.update(total_loss.item(), x_tr.size(0))
 
         # update accuracy meters
         cls_accs.update(cls_acc.item(), x_tr.size(0))
-        domain_accs.update(domain_acc.item(), x_tr.size(0))
+        domain_accs_1.update(domain_acc_1.item(), x_tr.size(0))
+        domain_accs_2.update(domain_acc_2.item(), x_tr.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -456,10 +471,12 @@ def train(train_iter: ForeverDataIterator,
     log.update({
         "Lambda Trade Off (Training Set)": lambda_trade_off,
         "Category Classification Loss (Training Set)": cls_losses.sum,
-        'Style Discrimination Loss (Training Set)': transfer_losses.sum,
+        'Style Discrimination Loss 1 (Training Set)': transfer_losses_1.sum,
+        'Style Discrimination Loss 2 (Training Set)': transfer_losses_2.sum,
         'Total Loss (Training Set)': total_losses.sum,
         'Category Classification Accuracy (Training Set)': cls_accs.avg,
-        'Style Discrimination Accuracy (Training Set)': domain_accs.avg,
+        'Style Discrimination Accuracy 1 (Training Set)': domain_accs_1.avg,
+        'Style Discrimination Accuracy 2 (Training Set)': domain_accs_2.avg,
         'Classification Logits': y_tr,
     })
     
