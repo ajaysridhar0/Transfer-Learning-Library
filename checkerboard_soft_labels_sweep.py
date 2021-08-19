@@ -45,7 +45,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #TODO: define function for grl, compare ensemble of domain discriminator heads with classifier head post-hoc to baseline
 
 def main(args: argparse.Namespace):
-    logger = CompleteLogger(args.log, args.phase)
+#     logger = CompleteLogger(args.log, args.phase)
     print(args)
 
     if args.seed is not None:
