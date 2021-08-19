@@ -189,9 +189,13 @@ def main(args: argparse.Namespace):
     #     cat_optimizer, lambda x: args.lr *
     #     (1. + args.lr_gamma * float(x))**(-args.lr_decay))
     
-    
-    best_model_path = os.path.join(args.global_log, "checkpoints", "best.pth")
-    latest_model_path = os.path.join(args.global_log, "checkpoints", "latest.pth")
+    log_folder_path = os.path.join(args.log, "checkpoints")
+    if not os.path.isdir(args.log):
+        os.mkdir(args.log)
+    if not os.path.isdir(log_folder_path):
+        os.mkdir(log_folder_path)
+    best_model_path = os.path.join(log_folder_path, "best.pth")
+    latest_model_path = os.path.join(log_folder_path, "latest.pth")
     
 #     resume from the best or latest checkpoint
     if args.phase != 'train':
@@ -302,9 +306,8 @@ def main(args: argparse.Namespace):
         wandb.log(total_log)
 
         # remember best acc@1 and save checkpoint
-        epoch_model_path = os.path.join(args.global_log, "checkpoints", f"epoch {epoch}.pth")
-        torch.save(classifier.state_dict(),
-                  latest_model_path)
+        epoch_model_path = os.path.join(args.log, "checkpoints", f"epoch {epoch}.pth")
+        torch.save(classifier.state_dict(), latest_model_path)
         torch.save(classifier.state_dict(), epoch_model_path)
         if acc1 > best_acc1:
             shutil.copy(epoch_model_path, best_model_path)
