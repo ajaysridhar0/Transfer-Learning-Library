@@ -1,5 +1,5 @@
 from common.utils.analysis import collect_feature_and_labels, tsne, post_hoc_accuracy
-from common.utils.logger import CompleteLogger
+# from common.utils.logger import CompleteLogger
 from common.utils.meter import AverageMeter, ProgressMeter
 from common.utils.metric import accuracy, ConfusionMatrix
 from common.utils.data import ForeverDataIterator
@@ -136,14 +136,12 @@ def main(args: argparse.Namespace):
     if args.max_iters:
         num_backprop = args.max_iters
     else:
-      num_backprop = args.iters_per_epoch * args.epochs 
+        num_backprop = args.iters_per_epoch * args.epochs 
        
     if args.gl_c == 'warm':
         cls_gl = WarmStartGradientLayer(alpha=args.alpha, lo=1., hi=args.lambda_c, max_iters=num_backprop, auto_step=True)
     elif args.gl_c == 'cool':
         cls_gl = WarmStartGradientLayer(alpha=args.alpha, lo=0., hi=args.lambda_c, max_iters=num_backprop, auto_step=True)
-    elif args.gl_c == 'adaptive':
-        cls_gl = GradientLayer(coeff=args.lambda_c)
     else:
         cls_gl = GradientLayer(coeff=args.lambda_c)
         
@@ -151,9 +149,6 @@ def main(args: argparse.Namespace):
         discr_gl = WarmStartGradientLayer(alpha=args.alpha, lo=0., hi=args.lambda_d, max_iters=num_backprop, auto_step=True) 
     elif args.gl_d == 'cold':
         discr_gl = WarmStartGradientLayer(alpha=args.alpha, lo=1., hi=args.lambda_d, max_iters=num_backprop, auto_step=True)
-    elif args.gl_d == 'adaptive':
-        # TODO
-        pass
     else:
         discr_gl = GradientAdaptiveLayer(coeff=args.lambda_d)
     
@@ -193,28 +188,32 @@ def main(args: argparse.Namespace):
     # lr_scheduler = LambdaLR(
     #     cat_optimizer, lambda x: args.lr *
     #     (1. + args.lr_gamma * float(x))**(-args.lr_decay))
-
-    # resume from the best or latest checkpoint
+    
+    
+    best_model_path = os.path.join(args.global_log, "checkpoints", "best.pth")
+    latest_model_path = os.path.join(args.global_log, "checkpoints", "latest.pth")
+    
+#     resume from the best or latest checkpoint
     if args.phase != 'train':
         if args.use_best_model:
-            checkpoint = torch.load(logger.get_checkpoint_path('best'),
+            checkpoint = torch.load(best_model_path,
                                     map_location='cpu')
         else:
-            checkpoint = torch.load(logger.get_checkpoint_path('latest'),
+            checkpoint = torch.load(latest_model_path,
                                     map_location='cpu')
         classifier.load_state_dict(checkpoint)
 
     def domain_analyze(features: torch.Tensor, domain_labels: torch.Tensor, dataset_type: str):
         title = f'{dataset_type} Dataset TSNE'
-        tSNE_filename = osp.join(logger.visualize_directory, f'{title}.png')
-        tsne.multidomain_visualize(
-            features=features,
-            domain_labels=domain_labels,
-            filename=tSNE_filename,
-            num_domains=len(datasets.domains()),
-            fig_title=title
-        )
-        print("Saving t-SNE to", tSNE_filename)
+#         tSNE_filename = osp.join(logger.visualize_directory, f'{title}.png')
+#         tsne.multidomain_visualize(
+#             features=features,
+#             domain_labels=domain_labels,
+#             filename=tSNE_filename,
+#             num_domains=len(datasets.domains()),
+#             fig_title=title
+#         )
+#         print("Saving t-SNE to", tSNE_filename)
         model = MultidomainDiscriminator(
             in_feature=classifier.features_dim,
             hidden_size=1024,
@@ -303,23 +302,22 @@ def main(args: argparse.Namespace):
         wandb.log(total_log)
 
         # remember best acc@1 and save checkpoint
+        epoch_model_path = os.path.join(args.global_log, "checkpoints", f"epoch {epoch}.pth")
         torch.save(classifier.state_dict(),
                    logger.get_checkpoint_path('latest'))
-        torch.save(classifier.state_dict(),
-                   logger.get_checkpoint_path(f'epoch {epoch}'))
+        torch.save(classifier.state_dict(), epoch_model_path)
         if acc1 > best_acc1:
-            shutil.copy(logger.get_checkpoint_path(f'epoch {epoch}'),
-                        logger.get_checkpoint_path('best'))
+            shutil.copy(logger.get_checkpoint_path(f'epoch {epoch}'), best_model_path)
             best_epoch = epoch
         best_acc1 = max(acc1, best_acc1)
 
     # load the model used for evaluation
     if args.use_best_model:
         classifier.load_state_dict(
-            torch.load(logger.get_checkpoint_path('best')))
+            torch.load(best_model_path))
     else:
         classifier.load_state_dict(
-            torch.load(logger.get_checkpoint_path('latest')))
+            torch.load(latest_model_path))
 
     # evaluate best model on validation set with more information and temp calculation
     acc1, best_val_log, t = validate(val_loader, classifier, multidomain_adv, args,
@@ -959,7 +957,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--global-log",
         type=str,
-        default='/checkerboard-domain-adaptation/logs/',
+        default='logs/',
         help="Where to save logs, checkpoints and debugging images.")
     parser.add_argument("--wandb-name",
                         type=str,

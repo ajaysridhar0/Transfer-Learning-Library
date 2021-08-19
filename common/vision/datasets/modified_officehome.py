@@ -66,7 +66,7 @@ class ModifiedOfficeHome(ImageList):
                   'Curtains', 'Fork', 'Soda', 'Table', 'Knives', 'Oven', 'Refrigerator', 'Marker']
     category_index = 0
 
-    def __init__(self, root: str, tasks: List[str], download: Optional[bool] = False, **kwargs):
+    def __init__(self, root: str, tasks: List[str], download: Optional[bool] = True, **kwargs):
         # TODO: Incorporate modified style file list
         # TODO: Make it accept lists of styles
         # assert task in self.image_list

@@ -77,19 +77,19 @@ class CheckerboardOfficeHome():
 
     def __init__(self,
                 root: str,
-                download: Optional[bool] = False,
+                download: Optional[bool] = True,
                 balance_domains: Optional[bool] = False, 
                 transforms = [None, None, None],
                  **kwargs):
         assert len(transforms) == len(self.images_lists)
-        # if download:
-        #     list(
-        #         map(lambda args: download_data(root, *args),
-        #             self.download_list))
-        # else:
-        #     list(
-        #         map(lambda name, file_name, _: check_exits(root, file_name),
-        #             self.download_list))
+#         if True or download:
+        list(
+             map(lambda args: download_data(root, *args),
+                  self.download_list))
+#         else:
+#             list(
+#                 map(lambda name, file_name, _: check_exits(root, file_name),
+#                     self.download_list))
         # TODO: Implement this
         self.generate_image_list(root, balance_domains)
 
