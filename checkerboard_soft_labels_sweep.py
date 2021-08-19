@@ -304,7 +304,7 @@ def main(args: argparse.Namespace):
         # remember best acc@1 and save checkpoint
         epoch_model_path = os.path.join(args.global_log, "checkpoints", f"epoch {epoch}.pth")
         torch.save(classifier.state_dict(),
-                  best_model_latest)
+                  latest_model_path)
         torch.save(classifier.state_dict(), epoch_model_path)
         if acc1 > best_acc1:
             shutil.copy(epoch_model_path, best_model_path)
