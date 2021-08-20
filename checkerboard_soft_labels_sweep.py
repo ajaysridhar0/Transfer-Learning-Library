@@ -306,11 +306,11 @@ def main(args: argparse.Namespace):
         wandb.log(total_log)
 
         # remember best acc@1 and save checkpoint
-        epoch_model_path = os.path.join(args.log, "checkpoints", f"epoch {epoch}.pth")
+#         epoch_model_path = os.path.join(args.log, "checkpoints", f"epoch {epoch}.pth")
         torch.save(classifier.state_dict(), latest_model_path)
-        torch.save(classifier.state_dict(), epoch_model_path)
+#         torch.save(classifier.state_dict(), epoch_model_path)
         if acc1 > best_acc1:
-            shutil.copy(epoch_model_path, best_model_path)
+            shutil.copy(latest_model_path, best_model_path)
             best_epoch = epoch
         best_acc1 = max(acc1, best_acc1)
 
