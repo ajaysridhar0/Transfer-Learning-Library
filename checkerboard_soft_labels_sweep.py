@@ -190,8 +190,6 @@ def main(args: argparse.Namespace):
     #     (1. + args.lr_gamma * float(x))**(-args.lr_decay))
     
     log_folder_path = os.path.join(args.log, "checkpoints")
-    if not os.path.isdir(args.log):
-        os.mkdir(args.log)
     if not os.path.isdir(log_folder_path):
         os.mkdir(log_folder_path)
     best_model_path = os.path.join(log_folder_path, "best.pth")
@@ -1056,6 +1054,12 @@ if __name__ == '__main__':
     else:
         wandb.init()
     args.log = f'{args.global_log}/{wandb.run.project}/{wandb.run.name}'
+    if not os.path.isdir(args.global_log):
+        os.mkdir(args.global_log)
+    if not os.path.isdir(f'{args.global_log}/{wandb.run.project}'):
+        os.mkdir(f'{args.global_log}/{wandb.run.project}')
+    if not os.path.isdir(args.log):
+        os.mkdir(args.log)
     # update the log with the sweep configurations
     if wandb.run:
         wandb.config.update({k: v for k, v in vars(args).items() if k not in wandb.config.as_dict()})
