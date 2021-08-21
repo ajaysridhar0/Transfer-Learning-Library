@@ -2,9 +2,10 @@
 # Kiri Wagstaff
 # June 21, 2021
 import sys
-import scipy
+from typing import List, Optional
 from scipy.optimize import minimize
-from scipy.stats import norm 
+from scipy.stats import norm
+from statsmodels.stats.proportion import proportion_confint
 import numpy as np
 from KDEpy import FFTKDE
 
@@ -216,7 +217,32 @@ def brier_conf_interval(probs, labels, num_classes, confidence=0.95, size=1000):
     
     return bootstrap_conf_interval(data_getter, len(probs), confidence, size)
 
+
+def rejection_data(probs: List[List[int]], labels: List[int], classes: List[int], use_fraction_rejected: Optional[bool]=False,
+                   confidence: Optional[float] = 0.95):
+    assert len(probs) == len(labels)
+    data = [(max(probs[i]), float(max(classes, key=lambda j: probs[i][j]) == labels[i]), 0.) for i in range(len(labels))]
+    dtype = [('max_prob', float), ('acc', float), ('ci', float)]
+    data = np.array(data, dtype=dtype)
+    data = np.sort(data, order='max_prob')
+    total = 0.
+    
+    for i in range(1, data.size):
+        total += data[data.size - i][1]
+        data[data.size - 1 - i][1] = total
+        
+    for i in range(data.size):
+        if use_fraction_rejected:
+            data[i][0] = (i + 1)/data.size
+        count = data[i][1]
+        nobs = data.size - i
+        # calculate the agresti_coull interval for the accuracy
+        ci_low, ci_upper = proportion_confint(count, nobs, 1 - confidence, 'agresti_coull')
+        data[i][1] = (ci_low + ci_upper)/2
+        data[i][2] = (ci_upper - ci_low)/2
+        
+    return data
 # statsmodels.stats.proportion.proportion_confint
 # method = "agresti_coull"
-
+# ci_low, ci_upp = statsmodels.stats.proportion.proportion_confint(count, nobs, 1 - confidence, 'agresti_coull')
     

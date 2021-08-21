@@ -8,7 +8,7 @@ import common.vision.models as models
 from common.vision.datasets.checkerboard_officehome import CheckerboardOfficeHome
 from dalib.adaptation.mdann import MultidomainAdversarialLoss, ImageClassifier
 from dalib.modules.grl import WarmStartGradientReverseLayer, GradientReverseLayer
-from dalib.modules.gl import GradientLayer, WarmStartGradientLayer
+from dalib.modules.gl import GradientLayer, WarmStartGradientLayer, GradientAdaptiveLayer
 
 from dalib.modules.multidomain_discriminator import MultidomainDiscriminator
 import random
@@ -20,7 +20,6 @@ import shutil
 import os.path as osp
 import numpy as np
 import os
-import yaml
 from typing import Optional, List, Tuple
 
 import torch
@@ -32,23 +31,23 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as T
 import torch.nn.functional as F
 from torch.utils.data.dataset import ConcatDataset
-from sklearn.metrics import confusion_matrix
-from scipy.stats import norm
+# from sklearn.metrics import confusion_matrix
 import seaborn as sn
 import pandas as pd
 import matplotlib.pyplot as plt
-from utils_ajay import temp_scaling, kernel_ece, kernel_ece_conf_interval, brier_multi, brier_conf_interval, rejection_data
+from utils_ajay import temp_scaling, kernel_ece, kernel_ece_conf_interval, brier_multi, brier_conf_interval
 import wandb
 
 sys.path.append('../../..')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 #TODO: define function for grl, compare ensemble of domain discriminator heads with classifier head post-hoc to baseline
 
-def main(args: argparse.Namespace): 
-    logger = CompleteLogger(args.log, args.phase)   
+def main(args: argparse.Namespace):
+    logger = CompleteLogger(args.log, args.phase)
     print(args)
-    
+
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -82,7 +81,11 @@ def main(args: argparse.Namespace):
         [ResizeImage(256),
          T.CenterCrop(224),
          T.ToTensor(), normalize])
-    
+
+    # assuming that args.sources and arg.targets are disjoint sets
+    # num_domains = len(args.sources) + len(args.targets)
+
+    # TODO: create the train, val, test, novel dataset
     transforms_list = [
         train_transform, val_transform, val_transform, val_transform
     ]
@@ -122,6 +125,8 @@ def main(args: argparse.Namespace):
 
     if not args.use_forever_iter:
         args.iters_per_epoch = len(train_loader)
+    # wandb.login()
+    # wandb.init(project=args.wandb_name, config=args)
 
     train_iter = ForeverDataIterator(train_loader)
 
@@ -131,48 +136,63 @@ def main(args: argparse.Namespace):
     if args.max_iters:
         num_backprop = args.max_iters
     else:
-        num_backprop = args.iters_per_epoch * args.epochs
-    # TODO: allow custom trade-off value for the gl
-    if args.gl == 'warm':
-        gl = WarmStartGradientLayer(alpha=args.alpha, lo=1., hi=args.lambda_c, max_iters=num_backprop, auto_step=True)
-    elif args.gl == 'cool':
-        gl = WarmStartGradientLayer(alpha=args.alpha, lo=0., hi=args.lambda_c, max_iters=num_backprop, auto_step=True)
+      num_backprop = args.iters_per_epoch * args.epochs 
+       
+    if args.gl_c == 'warm':
+        cls_gl = WarmStartGradientLayer(alpha=args.alpha, lo=1., hi=args.lambda_c, max_iters=num_backprop, auto_step=True)
+    elif args.gl_c == 'cool':
+        cls_gl = WarmStartGradientLayer(alpha=args.alpha, lo=0., hi=args.lambda_c, max_iters=num_backprop, auto_step=True)
+    elif args.gl_c == 'adaptive':
+        cls_gl = GradientLayer(coeff=args.lambda_c)
     else:
-        gl = GradientLayer(coeff=args.lambda_c)
+        cls_gl = GradientLayer(coeff=args.lambda_c)
+        
+    if args.gl_d == 'warm':
+        discr_gl = WarmStartGradientLayer(alpha=args.alpha, lo=0., hi=args.lambda_d, max_iters=num_backprop, auto_step=True) 
+    elif args.gl_d == 'cold':
+        discr_gl = WarmStartGradientLayer(alpha=args.alpha, lo=1., hi=args.lambda_d, max_iters=num_backprop, auto_step=True)
+    elif args.gl_d == 'adaptive':
+        # TODO
+        pass
+    else:
+        discr_gl = GradientAdaptiveLayer(coeff=args.lambda_d)
     
     classifier = ImageClassifier(backbone,
                                  len(datasets.classes()),
                                  bottleneck_dim=args.bottleneck_dim,
-                                 gl=gl).to(device)
+                                 gl=cls_gl).to(device)
 
+    # the extra output node is for the fake domain label
+    num_styles_to_predict = len(datasets.domains())
+        
     multidomain_discri = MultidomainDiscriminator(
         in_feature=classifier.features_dim,
         hidden_size=1024,
-        num_domains=len(datasets.domains())).to(device)
+        num_domains=num_styles_to_predict).to(device)
+    multidomain_adv = MultidomainAdversarialLoss(multidomain_discri, grl=discr_gl).to(device)
     
-    backbone_mul = 1.
-    if args.finetune:
-        backbone_mul = 0.1
-
     # define optimizer and lr scheduler
-    optimizer = SGD(classifier.get_parameters(backbone_lr=backbone_mul) +
-                    multidomain_discri.get_parameters(),
+    cat_optimizer = SGD(classifier.get_parameters(args.lr_back_c, args.lr_bottle_c, args.lr_head_c),
                     args.lr,
                     momentum=args.momentum,
                     weight_decay=args.weight_decay,
                     nesterov=True)
-    lr_scheduler = LambdaLR(
-        optimizer, lambda x: args.lr *
-        (1. + args.lr_gamma * float(x))**(-args.lr_decay))
-
-    # select the grl for the domain discriminator architecture
-    if args.grl == 'warm':
-        grl = WarmStartGradientReverseLayer(alpha=args.alpha, lo=0., hi=args.lambda_d, max_iters=num_backprop, auto_step=True)
-    elif args.grl == 'cool':
-        grl = WarmStartGradientReverseLayer(alpha=args.alpha, lo=1., hi=args.lambda_d, max_iters=num_backprop, auto_step=True)
-    else:
-        grl = GradientReverseLayer(coeff=args.lambda_d)
-    multidomain_adv = MultidomainAdversarialLoss(multidomain_discri, grl=grl).to(device)
+    
+    feature_optimizer = SGD(classifier.get_parameters(args.lr_bottle_d, args.lr_back_d, 0.),
+                        args.lr,
+                        momentum=args.momentum,
+                        weight_decay=args.weight_decay,
+                        nesterov=True)
+    
+    discr_optimizer = SGD(multidomain_discri.get_parameters(args.lr_head_d),
+                        args.lr,
+                        momentum=args.momentum,
+                        weight_decay=args.weight_decay,
+                        nesterov=True)
+    
+    # lr_scheduler = LambdaLR(
+    #     cat_optimizer, lambda x: args.lr *
+    #     (1. + args.lr_gamma * float(x))**(-args.lr_decay))
 
     # resume from the best or latest checkpoint
     if args.phase != 'train':
@@ -268,14 +288,15 @@ def main(args: argparse.Namespace):
     best_epoch = 0
     for epoch in range(args.epochs):
         # train for one epoch
-        train_log = train(train_iter, classifier, multidomain_adv, optimizer,
-                          lr_scheduler, epoch, args)
+        train_log = train(train_iter, classifier, multidomain_adv, cat_optimizer,
+                          feature_optimizer, discr_optimizer, epoch, args, num_styles_to_predict=num_styles_to_predict)
 
         # evaluate on validation set
         # is_final_epoch = epoch == args.epochs - 1
         acc1, val_log, _ = validate(val_loader, classifier, multidomain_adv, args,
                                  'Validation',  gen_conf_mat=False, 
-                                 calc_temp=False, gen_reli_diag=False, gen_rejection_curve=False)
+                                 calc_temp=False, gen_reli_diag=False, gen_rejection_curve=False,
+                                 num_styles_to_predict=num_styles_to_predict)
 
         total_log = train_log.copy()
         total_log.update(val_log.copy())
@@ -303,19 +324,22 @@ def main(args: argparse.Namespace):
     # evaluate best model on validation set with more information and temp calculation
     acc1, best_val_log, t = validate(val_loader, classifier, multidomain_adv, args,
                                  'Best Model on Validation',  gen_conf_mat=True, 
-                                 conf_interval=True, calc_temp=True, gen_reli_diag=True)
+                                 conf_interval=True, calc_temp=True, gen_reli_diag=True, 
+                                 num_styles_to_predict=num_styles_to_predict)
     print("best_val_acc1 = {:3.1f}".format(acc1))
     
     # evaluate best model on validation set with more information and temp calculation
     acc1, test_log, _ = validate(test_loader, classifier, multidomain_adv, args,
                                  'Test',  gen_conf_mat=True, calc_temp=False, 
-                                 conf_interval=True, input_temperature=t, gen_reli_diag=True)
+                                 conf_interval=True, input_temperature=t, gen_reli_diag=True, 
+                                 num_styles_to_predict=num_styles_to_predict)
     print("test_acc1 = {:3.1f}".format(acc1))
 
     # evaluate on novel set
     acc1, novel_log, _ = validate(novel_loader, classifier, multidomain_adv, args,
                                'Novel', gen_conf_mat=True, calc_temp=False, 
-                               conf_interval=True, input_temperature=t, gen_reli_diag=True)
+                               conf_interval=True, input_temperature=t, gen_reli_diag=True,
+                               num_styles_to_predict=num_styles_to_predict)
     print("novel_acc1 = {:3.1f}".format(acc1))
     
     eval_log = {"Best Category Classification Accuracy (Validation Set)": best_acc1,
@@ -327,27 +351,42 @@ def main(args: argparse.Namespace):
     eval_log.update(full_analysis(classifier))
     wandb.log(eval_log)
 
+    # if model_index == args.num_trials:
+    #     logger.close()
+    
+def softlabel_crossentropy(predicted_logits: torch.Tensor, num_domains: Optional[int]=4):
+    predicted_probs = F.softmax(predicted_logits, dim=1)
+    return -((1/num_domains) * torch.log(predicted_probs)).sum(dim=1).mean()
+
 def train(train_iter: ForeverDataIterator, 
           model: ImageClassifier,
           multidomain_adv: MultidomainAdversarialLoss, 
-          optimizer: SGD,
-          lr_scheduler: LambdaLR,
+          cls_optimizer: SGD,
+          feature_optimizer: SGD,
+          discr_optimizer: SGD,
           epoch: int, 
-          args: argparse.Namespace):
+          args: argparse.Namespace,
+          num_styles_to_predict: Optional[int] = 4):
     batch_time = AverageMeter('Time', ':5.2f')
     data_time = AverageMeter('Data', ':5.2f')
     cls_losses = AverageMeter('Cls Loss', ':6.2f')
-    transfer_losses = AverageMeter('Transfer Loss', ':6.2f')
+    discr_losses = AverageMeter('Discr Loss', ':6.2f')
+    feature_losses = AverageMeter('Feature Loss', ':6.2f')
     cls_accs = AverageMeter('Cls Acc', ':3.1f')
-    domain_accs = AverageMeter('Domain Acc', ':3.1f')
+    discr_accs = AverageMeter('Discr Acc', ':3.1f')
+    feature_accs = AverageMeter('Feature Invariance Acc', ':3.1f')
     progress = ProgressMeter(
         args.iters_per_epoch,
-        [batch_time, data_time, cls_losses, transfer_losses, cls_accs, domain_accs],
+        [batch_time, data_time, cls_accs, discr_accs, feature_accs],
         prefix="Epoch: [{}]".format(epoch))
+    log = {}
 
     # switch to train mode
     model.train()
     multidomain_adv.train()
+    # targe_domain_loss = np.log(num_styles_to_predict)
+    # dfeature_trade_off = 0
+    # prev_discr_loss = None
 
     end = time.time()
     for i in range(args.iters_per_epoch):
@@ -356,6 +395,7 @@ def train(train_iter: ForeverDataIterator,
         # retrieve the class and domain from the checkerboard office_home dataset
         class_labels_tr = CheckerboardOfficeHome.get_category(labels_tr)
         domain_labels_tr = CheckerboardOfficeHome.get_style(labels_tr)
+        fake_domain_labels_tr = (num_styles_to_predict - 1) * torch.ones(x_tr.size(0))
 
         # add training data to device
         x_tr = x_tr.to(device)
@@ -363,41 +403,48 @@ def train(train_iter: ForeverDataIterator,
         # add new labels to device
         class_labels_tr = class_labels_tr.to(device)
         domain_labels_tr = domain_labels_tr.to(device)
+        fake_domain_labels_tr = fake_domain_labels_tr.to(device=device, dtype=torch.int64)
 
         # measure data loading time
         data_time.update(time.time() - end)
-
-        # compute output
-        y_tr, f_tr = model(x_tr)
-
-        # calculate losses
-        cls_loss = F.cross_entropy(y_tr, class_labels_tr)
-        transfer_loss = multidomain_adv(f_tr, domain_labels_tr)
-        total_loss = cls_loss + transfer_loss
         
-        if i % (1 + args.d_steps_per_g) < args.d_steps_per_g:
-            loss_to_minimize = transfer_loss
-        else:
-            loss_to_minimize = total_loss
-
-        # calculate accuracy
-        cls_acc = accuracy(y_tr, class_labels_tr)[0]
-        domain_acc = multidomain_adv.domain_discriminator_accuracy
-
-        # update loss meter
-        cls_losses.update(cls_loss.item(), x_tr.size(0))
-        transfer_losses.update(transfer_loss.item(), x_tr.size(0))
-
-        # update accuracy meters
-        cls_accs.update(cls_acc.item(), x_tr.size(0))
-        domain_accs.update(domain_acc.item(), x_tr.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss_to_minimize.backward()
-        optimizer.step()
-        lr_scheduler.step()
-
+        if i % (1 + args.d_steps_per_g) >= args.d_steps_per_g:
+            ####################################################
+            # (1) Update Featurizer to maximize Domain Confusion
+            ####################################################
+            f_tr = model.featurizer_forward(x_tr)
+            feature_optimizer.zero_grad()    
+            feature_loss = multidomain_adv(f_tr, domain_labels_tr, custom_loss=softlabel_crossentropy)
+            feature_acc = multidomain_adv.domain_discriminator_accuracy
+            feature_loss.backward()
+            feature_optimizer.step()
+            feature_losses.update(feature_loss.item(), x_tr.size(0))
+            feature_accs.update(feature_acc.item(), x_tr.size(0))
+            
+            #########################################################################
+            # (3) Update Category Classifier to minimize Category Classification Loss
+            #########################################################################
+            cls_optimizer.zero_grad()
+            y_tr, _ = model(x_tr)
+            cls_loss = F.cross_entropy(y_tr, class_labels_tr)
+            cls_acc = accuracy(y_tr, class_labels_tr)[0]
+            cls_loss.backward()
+            cls_optimizer.step()
+            cls_losses.update(cls_loss.item(), x_tr.size(0))
+            cls_accs.update(cls_acc.item(), x_tr.size(0))
+        
+        ##############################################################
+        # (2) Update Domain Discriminator to minimize Domain Confusion
+        ##############################################################
+        discr_optimizer.zero_grad()
+        f_tr = model.featurizer_forward(x_tr)
+        discr_loss = multidomain_adv(f_tr, domain_labels_tr)
+        discr_acc = multidomain_adv.domain_discriminator_accuracy
+        discr_loss.backward()
+        discr_optimizer.step()
+        discr_losses.update(discr_loss.item(), x_tr.size(0))
+        discr_accs.update(discr_acc.item(), x_tr.size(0))
+        
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
@@ -405,17 +452,18 @@ def train(train_iter: ForeverDataIterator,
         if i % args.print_freq == 0:
             progress.display(i)
 
-    log = {}
     log.update({
         "Category Classification Loss (Training Set)": cls_losses.avg,
-        'Style Discrimination Loss (Training Set)': transfer_losses.avg,
-        # 'Total Loss (Training Set)': total_losses.sum,
+        'Style Discrimination Loss (Training Set)': discr_losses.avg,
+        'Feature Invariance Loss (Training Set)': feature_losses.avg,
         'Category Classification Accuracy (Training Set)': cls_accs.avg,
-        'Style Discrimination Accuracy (Training Set)': domain_accs.avg,
+        'Style Discrimination Accuracy (Training Set)': discr_accs.avg,
+        'Feature Invariance Accuracy (Training Set)': feature_accs.avg,
         'Classification Logits': y_tr,
     })
+    
     return log
-     
+        
 def validate(val_loader: DataLoader,
              model: ImageClassifier,
              multidomain_adv: MultidomainAdversarialLoss,
@@ -426,14 +474,16 @@ def validate(val_loader: DataLoader,
              input_temperature: Optional[int] = None,
              conf_interval: Optional[bool] = False,
              gen_reli_diag: Optional[bool] = False,
-             gen_rejection_curve: Optional[bool] = False):
+             gen_rejection_curve: Optional[bool] = False,
+             num_styles_to_predict: Optional[int] = 5):
     batch_time = AverageMeter('Time', ':6.3f')
     cls_losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
-    transfer_losses = AverageMeter('Transfer Loss', ':6.2f')
+    discr_losses = AverageMeter('Discr Loss', ':6.2f')
     domain_accs = AverageMeter('Domain Acc', ':6.2f')
-    losses = AverageMeter('Total Loss', ':6.2f')
+    feature_losses = AverageMeter('Total Loss', ':6.2f')
+    feature_accs = AverageMeter('Feature Invariance Acc', ':6.2f')
 
     progress = ProgressMeter(len(val_loader),
                              [batch_time, cls_losses, top1, top5, domain_accs],
@@ -463,13 +513,18 @@ def validate(val_loader: DataLoader,
             class_labels = class_labels.to(device)
             domain_labels = CheckerboardOfficeHome.get_style(target)
             domain_labels = domain_labels.to(device)
-
+            fake_domain_labels = (num_styles_to_predict - 1) * torch.ones(images.size(0))
+            fake_domain_labels = fake_domain_labels.to(device=device, dtype=torch.int64)
+            
             # compute output
             class_pred, features = model(images)
 
             # compute loss
             cls_loss = F.cross_entropy(class_pred, class_labels)
-            transfer_loss = multidomain_adv(features, domain_labels)
+            discr_loss = multidomain_adv(features, domain_labels)
+            domain_acc = multidomain_adv.domain_discriminator_accuracy
+            feature_loss = multidomain_adv(features, fake_domain_labels)
+            feature_acc = multidomain_adv.domain_discriminator_accuracy
 
             # measure accuracy and record class loss
             acc1, acc5 = accuracy(class_pred, class_labels, topk=(1, 5))
@@ -478,11 +533,11 @@ def validate(val_loader: DataLoader,
             cls_losses.update(cls_loss.item(), images.size(0))
             top1.update(acc1.item(), images.size(0))
             top5.update(acc5.item(), images.size(0))
-
-            # domain discrimination accuracy
-            domain_acc = multidomain_adv.domain_discriminator_accuracy
-            transfer_losses.update(transfer_loss.item(), images.size(0))
+            
+            discr_losses.update(discr_loss.item(), images.size(0))
             domain_accs.update(domain_acc.item(), images.size(0))
+            feature_losses.update(feature_loss.item(), images.size(0))
+            feature_accs.update(feature_acc.item(), images.size(0))
 
             # gather data for calibration evaluation
             all_class_logits.append(class_pred)
@@ -572,7 +627,7 @@ def validate(val_loader: DataLoader,
         domain_y_true = torch.squeeze(torch.cat(domain_y_true, dim=0)).tolist()
         domain_preds = torch.squeeze(torch.cat(domain_preds,
                                                      dim=0)).tolist()
-        styles = ['Art', 'Clipart', 'Product', 'Real World']
+        styles = ['Art', 'Clipart', 'Product', 'Real World', 'Out of Category']
         cats = val_loader.dataset.classes
         # class_conf_mat = confusion_matrix(class_y_true, class_predicitons)
         # domain_conf_mat = confusion_matrix(domain_y_true, domain_predictions)
@@ -588,18 +643,30 @@ def validate(val_loader: DataLoader,
         {
             f"Category Classification Loss ({dataset_type} Set)": cls_losses.avg,
             f'Category Classification Accuracy ({dataset_type} Set)': top1.avg,
-            f"Style Discriminator Loss ({dataset_type} Set)": transfer_losses.avg,
+            f"Style Discriminator Loss ({dataset_type} Set)": discr_losses.avg,
             f'Style Discriminator Accuracy ({dataset_type} Set)': domain_accs.avg,
-            # f"Total Loss ({dataset_type} Set)": losses.sum
+            f"Feature Invariance Loss ({dataset_type} Set)": feature_losses.avg,
+            f'Feature Invariance Accuracy ({dataset_type} Set)': feature_accs.avg,
         }
     )
     return top1.avg, log, calculated_temperature
 
+def confusion_matrix(y_true: List[int], pred: List[int], labels: List[int]) -> List[List[int]]:
+    result = []
+    for i in range(len(labels)):
+        row = []
+        for j in range(len(labels)):
+            row.append(0)
+        result.append(row)
+    for i in range(len(pred)):
+        result[y_true[i]][pred[i]] += 1
+    return result
+        
 def generate_conf_mat(pred: List[int], y_true: List[int], 
     class_labels: str, folder_path: str, title: str, 
     normalize: Optional[bool]=None, 
     figsize: Optional[Tuple[int]]=(15, 12)):
-    conf_mat = confusion_matrix(y_true, pred, normalize=normalize)
+    conf_mat = confusion_matrix(y_true, pred, labels=class_labels)
     df_conf_mat = pd.DataFrame(conf_mat, index=class_labels, columns=class_labels)
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
@@ -656,7 +723,8 @@ def calibration_evaluation(class_probs: List[List[int]],
     if temp_scaled:
         add_on = 'Post-Temperature-Scaling ' 
     
-    if args.use_conf_inv and conf_interval:
+    # TODO: remove false
+    if False and conf_interval:
         ece, ece_lower, ece_upper = kernel_ece_conf_interval(class_probs, class_labels, classes, 
                                                      confidence=confidence, size=bootstrap_size)
         brier, brier_lower, brier_upper = brier_conf_interval(class_probs, class_labels, len(classes), confidence, bootstrap_size)
@@ -667,6 +735,8 @@ def calibration_evaluation(class_probs: List[List[int]],
     else:
         brier = brier_multi(class_probs, class_labels, len(classes))    
     
+
+
     print(f"KDE Expected Calibration Error {add_on}({dataset_type} Set): {ece}")
     print(f"Brier Score {add_on}({dataset_type} Set): {brier}")
     
@@ -680,20 +750,33 @@ def calibration_evaluation(class_probs: List[List[int]],
 def temp_scale_probs(logits: torch.Tensor, temperature: int):
     scaled_logits = logits / temperature
     return F.softmax(scaled_logits, dim=1).tolist() 
+    
+def rejection_data(probs: List[List[int]], labels: List[int], classes: List[int], use_fraction_rejected: Optional[bool]=False):
+    assert len(probs) == len(labels)
+    data = [(max(probs[i]), float(max(classes, key=lambda j: probs[i][j]) == labels[i])) for i in range(len(labels))]
+    dtype = [('max_prob', float), ('acc', float)]
+    data = np.array(data, dtype=dtype)
+    data = np.sort(data, order='max_prob')
+    total = 0.
+    for i in range(1, data.size):
+        total += data[data.size - 2 - i][1]
+        data[data.size - 1 - i][1] = total
+    for i in range(data.size):
+        if use_fraction_rejected:
+            data[i][0] = (i + 1)/data.size
+        data[i][1] /= data.size - i
+    return data
 
 def rejection_curve(probs: List[List[int]], labels: List[int], classes: List[int],
                      log_path: str, dataset_type: str, temp_scaled: Optional[bool]=False, 
-                     use_fraction_rejected: Optional[bool]=False, figsize: Optional[Tuple[int]]=(10,10),
-                     confidence: Optional[float] = 0.95):
-    data = rejection_data(probs, labels, classes, use_fraction_rejected=use_fraction_rejected, confidence=confidence)
+                     use_fraction_rejected: Optional[bool]=False, figsize: Optional[Tuple[int]]=(10,10)):
+    data = rejection_data(probs, labels, classes, use_fraction_rejected=use_fraction_rejected)
     add_on = ''
     if temp_scaled:
         add_on = 'Post-Temperature-Scaling '
     
     plt.figure(figsize=figsize)
-    # unzip the probabilities and rejection probabilites
-    plt.scatter(*zip(*data[:,:2]), s=1)
-    plt.errorbar(*zip(*data[:,:2]), yerr=data[:, 2:], fmt='o')
+    plt.scatter(*zip(*data), s=1)
     
     if use_fraction_rejected:
         title = f'{add_on}Rejection Curve with Fraction Rejected ({dataset_type} Set)'
@@ -714,7 +797,7 @@ def rejection_curve(probs: List[List[int]], labels: List[int], classes: List[int
         os.makedirs(data_folder_path)
     np.save(f'{data_folder_path}/{title}_data.npy', data)
     plt.savefig(f'{graph_folder_path}/{title}.png')
-   
+
 if __name__ == '__main__':
     architecture_names = sorted(name for name in models.__dict__
                                 if name.islower() and not name.startswith("__")
@@ -744,18 +827,22 @@ if __name__ == '__main__':
                         default=256,
                         type=int,
                         help='Dimension of bottleneck')
+    parser.add_argument('--trade-off',
+                        default=1.,
+                        type=float,
+                        help='the trade-off hyper-parameter for transfer loss')
     parser.add_argument('--lambda-c',
                         default=1,
                         type=float,
-                        help='the trade-off hyper-parameter for classification head gl')
+                        help='the trade-off hyper-parameter for the classification classification head gl')
     parser.add_argument('--lambda-d',
-                        default=1,
+                        default=0.5,
                         type=float,
-                        help='the trade-off hyper-parameter for the domain discriminator head grl')
+                        help='the trade-off hyper-parameter for the domain discriminator head gl')
     parser.add_argument('--alpha',
-                        default=1.,
+                        default=10,
                         type=float,
-                        help='the alpha parameter in the warm and cool gradient layer')
+                        help='the alpha parameter in the Warm Start GRL scheduler for the trade off')
     # training parameters
     parser.add_argument('-b',
                         '--batch-size',
@@ -765,11 +852,54 @@ if __name__ == '__main__':
                         help='mini-batch size (default: 32)')
     parser.add_argument('--lr',
                         '--learning-rate',
-                        default=0.01,
+                        default=0.001,
                         type=float,
                         metavar='LR',
-                        help='initial learning rate',
+                        help='initial default learning rate',
                         dest='lr')
+    parser.add_argument('--lr-head-c',
+                        '--learning-rate-c',
+                        default=0.001,
+                        type=float,
+                        metavar='LR',
+                        help='initial learning rate for category classifier to minimize category classification loss',
+                        dest='lr_head_c')
+    parser.add_argument('--lr-bottle-c',
+                        '--learning-rate-back-c',
+                        default=0.001,
+                        type=float,
+                        metavar='LR',
+                        help='initial learning rate for bottleneck updates to minimize category classification loss',
+                        dest='lr_bottle_c')
+    parser.add_argument('--lr-back-c',
+                        '--learning-rate-bottle-c',
+                        default=0.001,
+                        type=float,
+                        metavar='LR',
+                        help='initial learning rate for backbone updates to minimize category classification loss',
+                        dest='lr_back_c')
+    parser.add_argument('--lr-head-d',
+                        '--learning-rate-d',
+                        default=0.001,
+                        type=float,
+                        metavar='LR',
+                        help='initial learning rate for domain discriminator updates to minimize domain discrimination loss',
+                        dest='lr_head_d')
+    parser.add_argument('--lr-bottle-d',
+                        '--learning-rate-bottle-d',
+                        default=0.001,
+                        type=float,
+                        metavar='LR',
+                        help='initial learning rate to bottleneck weights to maximize domain discrimination loss',
+                        dest='lr_bottle_d')
+    parser.add_argument('--lr-back-d',
+                        '--learning-rate-back-d',
+                        default=0.001,
+                        type=float,
+                        metavar='LR',
+                        help='initial learning rate for backbone updates to maximize domain discrimination loss',
+                        dest='lr_back_d')
+    # TODO: Utilize later
     parser.add_argument('--lr-gamma',
                         default=0.001,
                         type=float,
@@ -797,25 +927,15 @@ if __name__ == '__main__':
                         metavar='N',
                         help='number of data loading workers (default: 4)')
     parser.add_argument('--epochs',
-                        default=30,
+                        default=60,
                         type=int,
                         metavar='N',
-                        help='number of total epochs to run (default: 30)')
-    parser.add_argument('--num-trials',
-                        default=20,
-                        type=int,
-                        metavar='N',
-                        help='number of trials per sweep (default: 20)')
+                        help='number of total epochs to run (default: 60)')
     parser.add_argument('-i',
                         '--iters-per-epoch',
                         default=1000,
                         type=int,
                         help='Number of iterations per epoch')
-    parser.add_argument('--max-iters',
-                        '--warm-grl-max-iters',
-                        default=None,
-                        type=int,
-                        help='Number of iterations for the warm grl/gl to reach max value')
     parser.add_argument('-p',
                         '--print-freq',
                         default=100,
@@ -835,6 +955,10 @@ if __name__ == '__main__':
         type=str,
         default='/checkerboard-domain-adaptation/logs/',
         help="Where to save logs, checkpoints and debugging images.")
+    parser.add_argument("--wandb-name",
+                        type=str,
+                        default=None,
+                        help="Name that will appear in the wandb dashboard.")
     parser.add_argument(
         "--phase",
         type=str,
@@ -882,21 +1006,26 @@ if __name__ == '__main__':
         help='''If true, load the best model when testing and analyzing.
         If false, load the latest model when testing and analyzing.''')
     parser.add_argument(
-        "--gl",
+        "--gl-c",
         type=str,
-        default='warm',
-        choices=['warm', 'cool', 'constant'],
-        help="When gl is 'warm', the trade-off slowly increases from 0 to lambda."
-        "When gl is 'cold', the trade-off slowly decreases from 1 to lambda."
-        "When gl is 'constant', the trade-off is constant.")
+        default='constant',
+        choices=['warm', 'cool', 'constant', 'adaptive'],
+        help="When gl-c is 'warm', the trade-off slowly increases from 0 to lambda."
+        "When gl-c is 'cold', the trade-off slowly decreases from 1 to lambda."
+        "When gl-c is 'constant', the trade-off is constant.")
     parser.add_argument(
-        "--grl",
+        "--gl-d",
         type=str,
         default='warm',
-        choices=['warm', 'cool', 'constant'],
-        help="When grl is 'warm', the trade-off slowly increases from 0 to lambda."
-        "When grl is 'cold', the trade-off slowly decreases from 1 to lambda."
-        "When grl is 'constant', the trade-off is constant.")
+        choices=['warm', 'cool', 'constant', 'adaptive'],
+        help="When gl-d is 'warm', the trade-off slowly increases from 0 to lambda."
+        "When gl-d is 'cold', the trade-off slowly decreases from 1 to lambda."
+        "When gl-d is 'constant', the trade-off is constant.")
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=None,
+        help="Max iterations hyperparameter for the GL")
     parser.add_argument(
         '--finetune',
         dest="finetune",
@@ -909,29 +1038,10 @@ if __name__ == '__main__':
         default=True,
         action='store_false',
         help='''If false, set the learning rate of backbone to 1.0 of learning rate.''')
-    parser.add_argument(
-        '--conf-inv',
-        dest="use_conf_inv",
-        default=False,
-        action='store_true',
-        help='''Calculate the confidence intervals for the brier score, kECE, and reliability diagrams.''')
-    parser.add_argument(
-        '--no-conf-inv',
-        dest="use_conf_inv",
-        default=False,
-        action='store_false',
-        help='''Don't calculate the confidence intervals for the brier score, kECE, and reliability diagrams.''')
     parser.add_argument('--d-steps-per-g',
                         default=0,
                         type=int,
                         help='Number times the domain discriminator learns before the classifier starts learning.')
-    parser.add_argument("--wandb-name",
-                        type=str,
-                        default=None,
-                        help="Name that will appear in the wandb dashboard.")
-
-    args = parser.parse_args()
-    
     wandb.login()
     args = parser.parse_args()
     if args.wandb_name:
@@ -939,12 +1049,6 @@ if __name__ == '__main__':
     else:
         wandb.init()
     args.log = f'{args.global_log}/{wandb.run.project}/{wandb.run.name}'
-    if not os.path.isdir(args.global_log):
-        os.mkdir(args.global_log)
-    if not os.path.isdir(f'{args.global_log}/{wandb.run.project}/'):
-        os.mkdir(f'{args.global_log}/{wandb.run.project}/')
-    if not os.path.isdir(args.log):
-        os.mkdir(args.log)
     # update the log with the sweep configurations
     if wandb.run:
         wandb.config.update({k: v for k, v in vars(args).items() if k not in wandb.config.as_dict()})
