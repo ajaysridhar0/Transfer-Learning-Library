@@ -1,13 +1,22 @@
 # Classifier calibration utilities
-# Kiri Wagstaff
+# Kiri Wagstaff and Ajay Sridhar
 # June 21, 2021
 import sys
-from typing import List, Optional
+import os
+from typing import List, Tuple, Optional
+
 from scipy.optimize import minimize
 from scipy.stats import norm
 from statsmodels.stats.proportion import proportion_confint
+from sklearn.metrics import confusion_matrix
 import numpy as np
 from KDEpy import FFTKDE
+
+import seaborn as sn
+import pandas as pd
+import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
 
 
 # To optimize NLL for temperature scaling (Guo et al., 2017)
@@ -225,10 +234,10 @@ def rejection_data(probs: List[List[int]], labels: List[int], classes: List[int]
     dtype = [('max_prob', float), ('acc', float), ('ci', float)]
     data = np.array(data, dtype=dtype)
     data = np.sort(data, order='max_prob')
-    total = 0.
+    total = data[-1][1]
     
     for i in range(1, data.size):
-        total += data[data.size - i][1]
+        total += data[data.size - 1 - i][1]
         data[data.size - 1 - i][1] = total
         
     for i in range(data.size):
@@ -238,10 +247,136 @@ def rejection_data(probs: List[List[int]], labels: List[int], classes: List[int]
         nobs = data.size - i
         # calculate the agresti_coull interval for the accuracy
         ci_low, ci_upper = proportion_confint(count, nobs, 1 - confidence, 'agresti_coull')
-        data[i][1] = (ci_low + ci_upper)/2
+        data[i][1] = count/nobs
         data[i][2] = (ci_upper - ci_low)/2
         
     return data
+
+def generate_conf_mat(pred: List[int], y_true: List[int], 
+    class_labels: str, folder_path: str, title: str, 
+    normalize: Optional[bool]=None, 
+    figsize: Optional[Tuple[int]]=(15, 12)):
+    conf_mat = confusion_matrix(y_true, pred, normalize=normalize)
+    df_conf_mat = pd.DataFrame(conf_mat, index=class_labels, columns=class_labels)
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+    df_conf_mat.to_csv(os.path.join(folder_path, title))
+    plt.figure(figsize=figsize)
+    sn.heatmap(df_conf_mat, annot=True)
+    plt.title(title)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.savefig(os.path.join(folder_path, title))
+
+def reliability_diag(conf: List[int], est_acc: List[int], density: List[int],
+                      scaled_conf: List[int], scaled_est_acc: List[int], scaled_density: List[int],
+                      log_path: str, dataset_type: str, figsize: Optional[Tuple[int]]=(7,7)):
+    plt.figure(figsize=figsize)
+    plt.plot([0, 1], [0, 1], color='blue', label='Perfect Calibration')
+    plt.scatter(conf, est_acc, density, color='red', label='Non-Calibrated')
+    plt.scatter(scaled_conf, scaled_est_acc, scaled_density, color='green', label='Calibrated')
+    title = f"Reliability Diagram ({dataset_type} Set)"
+    plt.title(title)
+    plt.xlabel("Confidence")
+    plt.ylabel("Expected Accuracy")
+    plt.legend()
+    
+    graph_folder_path = os.path.join(log_path, 'reliability-diagram', 'graph')
+    data_folder_path = os.path.join(log_path, 'reliability-diagram', 'data')
+    if not os.path.exists(graph_folder_path):
+        os.makedirs(graph_folder_path)
+    if not os.path.exists(data_folder_path):
+        os.makedirs(data_folder_path)
+        
+    plt.savefig(os.path.join(graph_folder_path, f'{title}.png'))
+    np.save(os.path.join(data_folder_path, f'{title}_est_acc.npy'), est_acc)
+    np.save(os.path.join(data_folder_path, f'{title}_conf_npy.npy'), conf)
+    np.save(os.path.join(data_folder_path, f'{title}_density.npy'), density)
+    np.save(os.path.join(data_folder_path, f'{title}_scaled_est_acc.npy'), scaled_est_acc)
+    np.save(os.path.join(data_folder_path, f'{title}_scaled_conf.npy'), scaled_conf)
+    np.save(os.path.join(data_folder_path, f'{title}_scaled_density.npy'), scaled_density)
+
+def calibration_evaluation(class_probs: List[List[int]], 
+                           class_labels: List[int], 
+                           classes: List[int],
+                           dataset_type: str,
+                           temp_scaled: Optional[bool] = False,
+                           use_ci: Optional[bool] = False,
+                           confidence: Optional[float] = 0.95,
+                           bootstrap_size: Optional[int] = 1000):
+    log = {}
+    ece, est_acc, conf, density = kernel_ece(class_probs, class_labels, classes, give_kde_points=True)
+    
+    add_on = ''
+    if temp_scaled:
+        add_on = 'Post-Temperature-Scaling ' 
+    
+    if use_ci:
+        ece, ece_lower, ece_upper = kernel_ece_conf_interval(class_probs, class_labels, classes, 
+                                                     confidence=confidence, size=bootstrap_size)
+        brier, brier_lower, brier_upper = brier_conf_interval(class_probs, class_labels, len(classes), confidence, bootstrap_size)
+        ece_lbound_title = f'KDE Expected Calibration Error Lower Bound {add_on}({dataset_type}, Confidence = {confidence})'
+        ece_upbound_title = f'KDE Expected Calibration Error Upper Bound {add_on}({dataset_type}, Confidence = {confidence})'
+        brier_lbound_title =  f'Brier Score Lower Bound {add_on}({dataset_type}, Confidence = {confidence})'
+        brier_upbound_title = f'Brier Score Upper Bound {add_on}({dataset_type}, Confidence = {confidence})'
+        print(f'{ece_lbound_title} : {ece_lower}')
+        print(f'{ece_upbound_title} : {ece_upper}')
+        print(f'{brier_lbound_title} : {brier_lower}')
+        print(f'{brier_upbound_title} : {brier_upper}')
+        log.update({ece_lbound_title : ece_lower,
+                    ece_upbound_title : ece_upper,
+                    brier_lbound_title : brier_lower,
+                    brier_upbound_title : brier_upper})
+    else:
+        brier = brier_multi(class_probs, class_labels, len(classes))    
+    
+    print(f"KDE Expected Calibration Error {add_on}({dataset_type} Set): {ece}")
+    print(f"Brier Score {add_on}({dataset_type} Set): {brier}")
+    
+    log.update({
+        f'KDE Expected Calibration Error {add_on}({dataset_type})': ece,
+        f'Brier Score {add_on}({dataset_type})': brier
+    })
+
+    return log, est_acc, conf, density
+
+def temp_scale_probs(logits: torch.Tensor, temperature: int):
+    scaled_logits = logits / temperature
+    return F.softmax(scaled_logits, dim=1).tolist() 
+
+def rejection_curve(probs: List[List[int]], labels: List[int], classes: List[int],
+                     log_path: str, dataset_type: str, temp_scaled: Optional[bool]=False, 
+                     use_fraction_rejected: Optional[bool]=False, figsize: Optional[Tuple[int]]=(10,10),
+                     confidence: Optional[float] = 0.95):
+    data = rejection_data(probs, labels, classes, use_fraction_rejected=use_fraction_rejected, confidence=confidence)
+    add_on = ''
+    if temp_scaled:
+        add_on = 'Post-Temperature-Scaling '
+    
+    plt.figure(figsize=figsize)
+    # unzip the probabilities and rejection probabilites
+    xy_data = [(x, y) for x, y, conf in data]
+    conf_data = [conf for x, y, conf in data]
+    plt.scatter(*zip(*xy_data), s=0.5)
+    plt.errorbar(*zip(*xy_data), yerr=conf_data, ecolor='#a2c1f2')
+    
+    if use_fraction_rejected:
+        title = f'{add_on}Rejection Curve with Fraction Rejected ({dataset_type} Set)'
+        plt.xlabel("Fraction Rejected")
+    else:
+        title = f'{add_on}Rejection Curve with Rejection Threshold ({dataset_type} Set)'
+        plt.xlabel("Rejection Threshold")
+    plt.ylabel("Accuracy")
+    plt.title(title)
+    
+    graph_folder_path = os.path.join(log_path, 'rejection-curve', 'graph', dataset_type)
+    data_folder_path = os.path.join(log_path, 'rejection-curve', 'data', dataset_type)
+    if not os.path.exists(graph_folder_path):
+        os.makedirs(graph_folder_path)
+    if not os.path.exists(data_folder_path):
+        os.makedirs(data_folder_path)
+    np.save(os.path.join(data_folder_path, f'{title}_data.npy'), data)
+    plt.savefig(os.path.join(graph_folder_path, f'{title}.png'))
 # statsmodels.stats.proportion.proportion_confint
 # method = "agresti_coull"
 # ci_low, ci_upp = statsmodels.stats.proportion.proportion_confint(count, nobs, 1 - confidence, 'agresti_coull')

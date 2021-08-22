@@ -35,7 +35,7 @@ from torch.utils.data.dataset import ConcatDataset
 import seaborn as sn
 import pandas as pd
 import matplotlib.pyplot as plt
-from utils_ajay import temp_scaling, kernel_ece, kernel_ece_conf_interval, brier_multi, brier_conf_interval
+from utils_ajay import *
 import wandb
 
 sys.path.append('../../..')
@@ -228,7 +228,7 @@ def main(args: argparse.Namespace):
                                                 )
         title = f'Post-Hoc Domain Discrimination Confusion Matrix ({dataset_type} Set)'
         styles = ['Art', 'Clipart', 'Product', 'Real World']
-        generate_conf_mat(y_preds, y_true, styles, f'{args.log}/conf_mat/', title)
+        generate_conf_mat(y_preds, y_true, styles, os.path.join(args.log, 'conf_mat'), title)
         print(f'Post-Hoc Domain Discrimination Accuracy ({dataset_type} Set) = {post_hoc_domain_acc}')
         return {f'Post-Hoc Domain Discrimination Accuracy ({dataset_type} Set)': post_hoc_domain_acc}
 
@@ -584,7 +584,6 @@ def validate(val_loader: DataLoader,
                                         classes, 
                                         dataset_type,
                                         conf_interval=conf_interval
-                                        # f'{args.log}/calibration/'
                                     )
     log.update(cal_log)
     calculated_temperature = None
@@ -637,7 +636,7 @@ def validate(val_loader: DataLoader,
         cats = val_loader.dataset.classes
         # class_conf_mat = confusion_matrix(class_y_true, class_predicitons)
         # domain_conf_mat = confusion_matrix(domain_y_true, domain_predictions)
-        folderpath = f'{args.log}/conf_mat'
+        folderpath = os.path.join(args.log, conf_mat)
         class_title = f'Category Classification Confusion Matrix ({dataset_type} Set)'
         domain_title = f'Style Discrimination Confusion Matrix ({dataset_type} Set)'
         
@@ -657,152 +656,6 @@ def validate(val_loader: DataLoader,
     )
     return top1.avg, log, calculated_temperature
 
-def confusion_matrix(y_true: List[int], pred: List[int], labels: List[int]) -> List[List[int]]:
-    result = []
-    for i in range(len(labels)):
-        row = []
-        for j in range(len(labels)):
-            row.append(0)
-        result.append(row)
-    for i in range(len(pred)):
-        result[y_true[i]][pred[i]] += 1
-    return result
-        
-def generate_conf_mat(pred: List[int], y_true: List[int], 
-    class_labels: str, folder_path: str, title: str, 
-    normalize: Optional[bool]=None, 
-    figsize: Optional[Tuple[int]]=(15, 12)):
-    conf_mat = confusion_matrix(y_true, pred, labels=class_labels)
-    df_conf_mat = pd.DataFrame(conf_mat, index=class_labels, columns=class_labels)
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-    df_conf_mat.to_csv(f'{folder_path}/{title}.csv')
-    plt.figure(figsize=figsize)
-    sn.heatmap(df_conf_mat, annot=True)
-    plt.title(title)
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.savefig(f'{folder_path}/{title}.png')
-
-def reliability_diag(conf: List[int], est_acc: List[int], density: List[int],
-                      scaled_conf: List[int], scaled_est_acc: List[int], scaled_density: List[int],
-                      log_path: str, dataset_type: str, figsize: Optional[Tuple[int]]=(7,7)):
-    plt.figure(figsize=figsize)
-    plt.plot([0, 1], [0, 1], color='blue', label='Perfect Calibration')
-    plt.scatter(conf, est_acc, density, color='red', label='Non-Calibrated')
-    plt.scatter(scaled_conf, scaled_est_acc, scaled_density, color='green', label='Calibrated')
-    title = f"Reliability Diagram ({dataset_type} Set)"
-    plt.title(title)
-    plt.xlabel("Confidence")
-    plt.ylabel("Expected Accuracy")
-    plt.legend()
-    
-    graph_folder_path = f'{log_path}/reliability-diagram/graph/'
-    data_folder_path = f'{log_path}/reliability-diagram/data/'
-    if not os.path.exists(log_path):
-        os.makedirs(log_path)
-    if not os.path.exists(graph_folder_path):
-        os.makedirs(graph_folder_path)
-    if not os.path.exists(data_folder_path):
-        os.makedirs(data_folder_path)
-        
-    plt.savefig(f'{graph_folder_path}/{title}.png')
-    np.save(f'{data_folder_path}/{title}_est_acc.npy', est_acc)
-    np.save(f'{data_folder_path}/{title}_conf.npy', conf)
-    np.save(f'{data_folder_path}/{title}_density.npy', density)
-    np.save(f'{data_folder_path}/{title}_scaled_est_acc.npy', scaled_est_acc)
-    np.save(f'{data_folder_path}/{title}_scaled_conf.npy', scaled_conf)
-    np.save(f'{data_folder_path}/{title}_scaled_density.npy', scaled_density)
-
-def calibration_evaluation(class_probs: List[List[int]], 
-                           class_labels: List[int], 
-                           classes: List[int],
-                           dataset_type: str,
-                           temp_scaled: Optional[bool] = False,
-                           conf_interval: Optional[bool] = False,
-                           confidence: Optional[float] = 0.95,
-                           bootstrap_size: Optional[int] = 1000):
-    log = {}
-    ece, est_acc, conf, density = kernel_ece(class_probs, class_labels, classes, give_kde_points=True)
-    
-    add_on = ''
-    if temp_scaled:
-        add_on = 'Post-Temperature-Scaling ' 
-    
-    # TODO: remove false
-    if False and conf_interval:
-        ece, ece_lower, ece_upper = kernel_ece_conf_interval(class_probs, class_labels, classes, 
-                                                     confidence=confidence, size=bootstrap_size)
-        brier, brier_lower, brier_upper = brier_conf_interval(class_probs, class_labels, len(classes), confidence, bootstrap_size)
-        log.update({f'KDE Expected Calibration Error Lower Bound {add_on}({dataset_type}, Confidence = {confidence})': ece_lower,
-                    f'KDE Expected Calibration Error Upper Bound {add_on}({dataset_type}, Confidence = {confidence})': ece_upper,
-                    f'Brier Score Lower Bound {add_on}({dataset_type}, Confidence = {confidence})': brier_lower,
-                    f'Brier Score Upper Bound {add_on}({dataset_type}, Confidence = {confidence})': brier_upper})
-    else:
-        brier = brier_multi(class_probs, class_labels, len(classes))    
-    
-
-
-    print(f"KDE Expected Calibration Error {add_on}({dataset_type} Set): {ece}")
-    print(f"Brier Score {add_on}({dataset_type} Set): {brier}")
-    
-    log.update({
-        f'KDE Expected Calibration Error {add_on}({dataset_type})': ece,
-        f'Brier Score {add_on}({dataset_type})': brier
-    })
-
-    return log, est_acc, conf, density
-
-def temp_scale_probs(logits: torch.Tensor, temperature: int):
-    scaled_logits = logits / temperature
-    return F.softmax(scaled_logits, dim=1).tolist() 
-    
-def rejection_data(probs: List[List[int]], labels: List[int], classes: List[int], use_fraction_rejected: Optional[bool]=False):
-    assert len(probs) == len(labels)
-    data = [(max(probs[i]), float(max(classes, key=lambda j: probs[i][j]) == labels[i])) for i in range(len(labels))]
-    dtype = [('max_prob', float), ('acc', float)]
-    data = np.array(data, dtype=dtype)
-    data = np.sort(data, order='max_prob')
-    total = 0.
-    for i in range(1, data.size):
-        total += data[data.size - 2 - i][1]
-        data[data.size - 1 - i][1] = total
-    for i in range(data.size):
-        if use_fraction_rejected:
-            data[i][0] = (i + 1)/data.size
-        data[i][1] /= data.size - i
-    return data
-
-def rejection_curve(probs: List[List[int]], labels: List[int], classes: List[int],
-                     log_path: str, dataset_type: str, temp_scaled: Optional[bool]=False, 
-                     use_fraction_rejected: Optional[bool]=False, figsize: Optional[Tuple[int]]=(10,10)):
-    data = rejection_data(probs, labels, classes, use_fraction_rejected=use_fraction_rejected)
-    add_on = ''
-    if temp_scaled:
-        add_on = 'Post-Temperature-Scaling '
-    
-    plt.figure(figsize=figsize)
-    plt.scatter(*zip(*data), s=1)
-    
-    if use_fraction_rejected:
-        title = f'{add_on}Rejection Curve with Fraction Rejected ({dataset_type} Set)'
-        plt.xlabel("Fraction Rejected")
-    else:
-        title = f'{add_on}Rejection Curve with Rejection Threshold ({dataset_type} Set)'
-        plt.xlabel("Rejection Threshold")
-    plt.ylabel("Accuracy")
-    plt.title(title)
-    
-    graph_folder_path = f'{log_path}/rejection-curve/graph/{dataset_type}/'
-    data_folder_path = f'{log_path}/rejection-curve/data/{dataset_type}/'
-    if not os.path.exists(log_path):
-        os.makedirs(log_path)
-    if not os.path.exists(graph_folder_path):
-        os.makedirs(graph_folder_path)
-    if not os.path.exists(data_folder_path):
-        os.makedirs(data_folder_path)
-    np.save(f'{data_folder_path}/{title}_data.npy', data)
-    plt.savefig(f'{graph_folder_path}/{title}.png')
 
 if __name__ == '__main__':
     architecture_names = sorted(name for name in models.__dict__
@@ -959,7 +812,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--global-log",
         type=str,
-        default='/checkerboard-domain-adaptation/logs/',
+        default=os.path.join('checkerboard-domain-adaptation', 'logs'),
         help="Where to save logs, checkpoints and debugging images.")
     parser.add_argument("--wandb-name",
                         type=str,
@@ -1048,13 +901,28 @@ if __name__ == '__main__':
                         default=0,
                         type=int,
                         help='Number times the domain discriminator learns before the classifier starts learning.')
+    parser.add_argument(
+        '--conf-inv',
+        dest="use_conf_inv",
+        default=False,
+        action='store_true',
+        help='''Calculate the confidence intervals for the brier score, kECE, and reliability diagrams.''')
+    parser.add_argument(
+        '--no-conf-inv',
+        dest="use_conf_inv",
+        default=False,
+        action='store_false',
+        help='''Don't calculate the confidence intervals for the brier score, kECE, and reliability diagrams.''')
+    
     wandb.login()
     args = parser.parse_args()
     if args.wandb_name:
         wandb.init(project=args.wandb_name)
     else:
         wandb.init()
-    args.log = f'{args.global_log}/{wandb.run.project}/{wandb.run.name}'
+    args.log = os.path.join(args.global_log, wandb.run.project, wandb.run.name)
+    if not os.path.isdir(args.log):
+        os.makedirs(args.log)
     # update the log with the sweep configurations
     if wandb.run:
         wandb.config.update({k: v for k, v in vars(args).items() if k not in wandb.config.as_dict()})
