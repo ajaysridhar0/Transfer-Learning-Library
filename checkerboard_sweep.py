@@ -1,5 +1,4 @@
 from common.utils.analysis import collect_feature_and_labels, tsne, post_hoc_accuracy
-from common.utils.logger import CompleteLogger
 from common.utils.meter import AverageMeter, ProgressMeter
 from common.utils.metric import accuracy, ConfusionMatrix
 from common.utils.data import ForeverDataIterator
@@ -44,8 +43,7 @@ sys.path.append('../../..')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #TODO: define function for grl, compare ensemble of domain discriminator heads with classifier head post-hoc to baseline
 
-def main(args: argparse.Namespace): 
-    logger = CompleteLogger(args.log, args.phase)   
+def main(args: argparse.Namespace):   
     print(args)
     
     if args.seed is not None:
@@ -172,28 +170,27 @@ def main(args: argparse.Namespace):
     else:
         grl = GradientReverseLayer(coeff=args.lambda_d)
     multidomain_adv = MultidomainAdversarialLoss(multidomain_discri, grl=grl).to(device)
+    
+    
+    log_folder_path = os.path.join(args.log, "checkpoints")
+    if not os.path.isdir(args.log):
+        os.makedirs(args.log)
+    if not os.path.isdir(log_folder_path):
+        os.makedirs(log_folder_path)
+    best_model_path = os.path.join(log_folder_path, "best.pth")
+    latest_model_path = os.path.join(log_folder_path, "latest.pth")
 
     # resume from the best or latest checkpoint
     if args.phase != 'train':
         if args.use_best_model:
-            checkpoint = torch.load(logger.get_checkpoint_path('best'),
+            checkpoint = torch.load(best_model_path,
                                     map_location='cpu')
         else:
-            checkpoint = torch.load(logger.get_checkpoint_path('latest'),
+            checkpoint = torch.load(latest_model_path,
                                     map_location='cpu')
         classifier.load_state_dict(checkpoint)
 
     def domain_analyze(features: torch.Tensor, domain_labels: torch.Tensor, dataset_type: str):
-        title = f'{dataset_type} Dataset TSNE'
-        tSNE_filename = osp.join(logger.visualize_directory, f'{title}.png')
-        tsne.multidomain_visualize(
-            features=features,
-            domain_labels=domain_labels,
-            filename=tSNE_filename,
-            num_domains=len(datasets.domains()),
-            fig_title=title
-        )
-        print("Saving t-SNE to", tSNE_filename)
         model = MultidomainDiscriminator(
             in_feature=classifier.features_dim,
             hidden_size=1024,
@@ -282,22 +279,20 @@ def main(args: argparse.Namespace):
 
         # remember best acc@1 and save checkpoint
         torch.save(classifier.state_dict(),
-                   logger.get_checkpoint_path('latest'))
-        torch.save(classifier.state_dict(),
-                   logger.get_checkpoint_path(f'epoch {epoch}'))
+                   latest_model_path)
         if acc1 > best_acc1:
-            shutil.copy(logger.get_checkpoint_path(f'epoch {epoch}'),
-                        logger.get_checkpoint_path('best'))
+            shutil.copy(latest_model_path,
+                        best_model_path)
             best_epoch = epoch
         best_acc1 = max(acc1, best_acc1)
 
     # load the model used for evaluation
     if args.use_best_model:
         classifier.load_state_dict(
-            torch.load(logger.get_checkpoint_path('best')))
+            torch.load(best_model_path))
     else:
         classifier.load_state_dict(
-            torch.load(logger.get_checkpoint_path('latest')))
+            torch.load(latest_model_path))
 
     # evaluate best model on validation set with more information and temp calculation
     acc1, best_val_log, t = validate(val_loader, classifier, multidomain_adv, args,
@@ -522,7 +517,6 @@ def validate(val_loader: DataLoader,
                                         classes, 
                                         dataset_type,
                                         conf_interval=conf_interval
-                                        # f'{args.log}/calibration/'
                                     )
     log.update(cal_log)
     calculated_temperature = None
@@ -848,7 +842,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--global-log",
         type=str,
-        default='/checkerboard-domain-adaptation/logs/',
+        default='logs/',
         help="Where to save logs, checkpoints and debugging images.")
     parser.add_argument(
         "--phase",
@@ -932,14 +926,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     ####### START THE SWEEP #######
-    # wandb.login()
-    # # with open('checkerboard-domain-adaptation/checkerboard_sweep.yaml', 'r') as stream:
-    # #     sweep_config = yaml.safe_load(stream)
-    # # sweep_id = wandb.sweep(sweep_config)
-
-    # # wandb.agent(sweep_id, function=lambda: main(args), count=args.num_trials)
-    # main(args)
-    
     wandb.login()
     wandb.init()
     args = parser.parse_args()
